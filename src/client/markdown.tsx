@@ -1,19 +1,35 @@
 import type { ReactNode } from 'react'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { copyTextToClipboard } from './clipboard.ts'
 
 function CodeBlock({ language, code }: { language: string; code: string }) {
   const [copied, setCopied] = useState(false)
+  const resetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (resetTimerRef.current) {
+        clearTimeout(resetTimerRef.current)
+      }
+    }
+  }, [])
 
   const handleCopy = () => {
-    void navigator.clipboard?.writeText(code).then(() => {
+    void copyTextToClipboard(code).then((ok) => {
+      if (!ok) return
       setCopied(true)
-      setTimeout(() => setCopied(false), 1500)
+      if (resetTimerRef.current) {
+        clearTimeout(resetTimerRef.current)
+      }
+      resetTimerRef.current = setTimeout(() => {
+        setCopied(false)
+      }, 1500)
     })
   }
 
   return (
     <div className="dsh-thr-codeblock">
-      <div className="dsh-thr-codeblock-head">
+      <div className="dsh-thr-codeblock-head" data-dsh-thr-sel-exclude="">
         <span>{language || 'code'}</span>
         <button type="button" className="dsh-thr-btn-xs" onClick={handleCopy}>
           {copied ? 'Copied' : 'Copy'}

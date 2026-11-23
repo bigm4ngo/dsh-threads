@@ -45,10 +45,13 @@ export function ModelPickerRow({
   }
 
   return (
-    <div className="dsh-thr-row" style={{ gap: compact ? 4 : 6 }}>
+    <div
+      className="dsh-thr-row"
+      style={{ gap: compact ? 4 : 6, flexWrap: compact ? 'nowrap' : 'wrap', width: '100%' }}
+    >
       <select
         className="dsh-thr-select"
-        style={{ flex: '1 1 160px', maxWidth: '100%' }}
+        style={{ flex: compact ? '1 1 0' : '1 1 160px', minWidth: 0, maxWidth: '100%' }}
         disabled={disabled || groups.length === 0}
         value={modelKey(value)}
         onChange={(e) => handleModelChange(e.target.value)}

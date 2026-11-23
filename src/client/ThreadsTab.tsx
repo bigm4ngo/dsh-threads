@@ -403,7 +403,7 @@ export function ThreadsTabBody(props: SidebarRightTabProps) {
         </button>
       </div>
 
-      <div className="dsh-thr-body">
+      <div className={subTab === 'side' ? 'dsh-thr-body dsh-thr-body-side' : 'dsh-thr-body'}>
         {loading && !inspect && <div className="dsh-thr-muted">Loading session state…</div>}
         {error && <div className="dsh-thr-err">{error}</div>}
 

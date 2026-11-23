@@ -46,8 +46,8 @@ The right-sidebar **Threads** tab is organized into four sub-tabs:
 Ask follow-up questions about the current conversation without polluting the main session history or cluttering the left sidebar.
 
 1. Open **Threads → Side Chats** (or highlight a passage in chat and click **Side chat**, or run `/side <question>`).
-2. Pick any available model and reasoning effort from the inline model selector (defaults to the current session's model).
-3. Ask follow-up questions in the side-chat composer. Text and reasoning stream live; click **Stop** at any time to cancel a response in progress while keeping partial output.
+2. Switch between side chats or click **+ New** at any time from the pinned header bar, and change the model or reasoning effort directly in the pinned composer controls.
+3. Ask follow-up questions in the side-chat composer. Text and reasoning stream live; click **Stop** at any time to cancel a response in progress while keeping partial output. You can copy any side-chat message or highlight text inside a side chat to quote or copy it straight into the side-chat composer.
 4. When you have an answer worth bringing back:
    - **Add findings to parent**: Review or edit the findings (optionally click **AI Distill** to condense the thread), then choose **Insert into draft** (appends below any unfinished text in the parent typing box without overwriting it) or **Send now**.
    - **Promote to session**: Graduate the side chat into a full DSH session in either the **Same workspace** or a **New isolated Git worktree**, via **Open in typing box** or **Promote & Send now**.
