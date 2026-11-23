@@ -1,0 +1,6 @@
+node_modules/
+*.log
+.DS_Store
+
+# local verification rig and throw-away probes; not shipped
+.scratch/

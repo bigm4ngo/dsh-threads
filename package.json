@@ -1,0 +1,86 @@
+{
+  "name": "dsh-threads",
+  "version": "0.1.0",
+  "description": "Provider-neutral side chats, fork tree & merge-back, edit & retry, and portable provider handoff for DeepSeek Harness.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bigm4ngo/dsh-threads.git"
+  },
+  "homepage": "https://github.com/bigm4ngo/dsh-threads#readme",
+  "bugs": {
+    "url": "https://github.com/bigm4ngo/dsh-threads/issues"
+  },
+  "type": "module",
+  "icon": "icon.svg",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "node scripts/build.mjs",
+    "test": "node --test src/host/*.test.ts src/client/*.test.ts"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "@types/react": "^18.3.1",
+    "esbuild": "^0.25.0",
+    "react": "^18.3.1",
+    "typescript": "^5.8.2"
+  },
+  "peerDependencies": {
+    "react": "^18.3.1"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=22.0.0",
+    "dsh": ">=0.2.2-alpha.2 <0.3.0"
+  },
+  "files": [
+    "lib",
+    "locale",
+    "icon.svg",
+    "README.md",
+    "LICENSE",
+    "cordis.patch.yml"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "threads",
+    "side-chat",
+    "fork",
+    "handoff",
+    "rewind"
+  ],
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-api-workspace-controller",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-chat",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-session",
+        "@deepseek-ai/dsh-client-ui-sidebar-right",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-workspace"
+      ]
+    }
+  }
+}
