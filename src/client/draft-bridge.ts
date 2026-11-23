@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { formatQuoteBlock } from './side-chat-quote.ts'
 
 export interface QueuedDraft {
   sessionId: string
@@ -7,7 +8,18 @@ export interface QueuedDraft {
 }
 
 const pendingBySession = new Map<string, QueuedDraft>()
+const pendingQuotesBySession = new Map<string, string[]>()
 const listeners = new Set<() => void>()
+
+function notifyListeners(): void {
+  for (const fn of listeners) {
+    try {
+      fn()
+    } catch {
+      // Ignore subscriber errors.
+    }
+  }
+}
 
 export function composeMergedDraft(
   existingDraft: string,
@@ -39,13 +51,7 @@ export function queueDraft(
     text,
     mode: existing && mode === 'append' ? existing.mode : mode,
   })
-  for (const fn of listeners) {
-    try {
-      fn()
-    } catch {
-      // Ignore subscriber errors.
-    }
-  }
+  notifyListeners()
 }
 
 export function takeDraft(sessionId: string): QueuedDraft | undefined {
@@ -55,9 +61,27 @@ export function takeDraft(sessionId: string): QueuedDraft | undefined {
   return found
 }
 
+export function queueQuote(sessionId: string, text: string): void {
+  const clean = text.trim()
+  if (!sessionId || !clean) return
+  const existing = pendingQuotesBySession.get(sessionId) ?? []
+  pendingQuotesBySession.set(sessionId, [...existing, clean])
+  notifyListeners()
+}
+
+export function takeQuotes(sessionId: string): string[] {
+  const found = pendingQuotesBySession.get(sessionId)
+  if (!found || found.length === 0) return []
+  pendingQuotesBySession.delete(sessionId)
+  return found
+}
+
 export function DraftRelay(props: {
   sessionId?: string
-  inputActions?: { setDraft?: (text: string) => void }
+  inputActions?: {
+    setDraft?: (text: string) => void
+    insertQuote?: (text: string) => boolean
+  }
   useInput?: <T>(selector: (state: { draft: string }) => T) => T
 }) {
   const { sessionId, inputActions, useInput } = props
@@ -66,12 +90,25 @@ export function DraftRelay(props: {
   draftRef.current = currentDraft
 
   useEffect(() => {
-    if (!sessionId || !inputActions?.setDraft) return
+    if (!sessionId || !inputActions) return
     const flush = () => {
+      const quotes = takeQuotes(sessionId)
+      let draftCursor = draftRef.current
+      for (const q of quotes) {
+        if (inputActions.insertQuote?.(q) === true) continue
+        const block = formatQuoteBlock(q)
+        if (block) {
+          draftCursor = composeMergedDraft(draftCursor, block, 'append')
+          inputActions.setDraft?.(draftCursor)
+          draftRef.current = draftCursor
+        }
+      }
+
       const next = takeDraft(sessionId)
       if (!next) return
-      const finalText = composeMergedDraft(draftRef.current, next.text, next.mode)
+      const finalText = composeMergedDraft(draftCursor, next.text, next.mode)
       inputActions.setDraft?.(finalText)
+      draftRef.current = finalText
     }
     flush()
     listeners.add(flush)

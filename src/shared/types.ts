@@ -82,11 +82,21 @@ export interface TurnSummary {
   model?: ModelSelectionSpec
 }
 
+export interface SideChatToolCall {
+  id: string
+  name: string
+  summary: string
+  status: 'running' | 'done' | 'error'
+  outputPreview?: string
+  error?: string
+}
+
 export interface SideChatMessage {
   id: string
   role: 'user' | 'assistant'
   text: string
   reasoning?: string
+  toolCalls?: SideChatToolCall[]
   createdAt: number
   model?: ModelSelectionSpec
   streaming?: boolean
@@ -104,6 +114,7 @@ export interface SideChat {
   contextTurnCount: number
   contextSummary: string
   model: ModelSelectionSpec
+  toolsEnabled?: boolean
   messages: SideChatMessage[]
   promotedSessionId?: string
   mergedBackAt?: number
@@ -185,16 +196,19 @@ export interface CreateSideChatRequest {
   question?: string
   maxContextTurns?: number
   model?: ModelSelectionSpec
+  toolsEnabled?: boolean
 }
 
 export interface SendSideChatMessageRequest {
   text: string
   model?: ModelSelectionSpec
+  toolsEnabled?: boolean
 }
 
 export interface UpdateSideChatRequest {
   title?: string
   model?: ModelSelectionSpec
+  toolsEnabled?: boolean
 }
 
 export interface PromoteSideChatRequest {
@@ -337,6 +351,14 @@ export type ThreadsSseEvent =
       messageId: string
       delta: string
       channel?: 'text' | 'reasoning'
+      seq?: number
+    }
+  | {
+      type: 'side-chat-tool'
+      parentSessionId: string
+      sideChatId: string
+      messageId: string
+      toolCall: SideChatToolCall
       seq?: number
     }
   | {

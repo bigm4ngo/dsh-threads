@@ -137,41 +137,132 @@ const CSS_TEXT = `
   gap: 6px;
 }
 
-.dsh-thr-side-textarea {
+.dsh-thr-draft-wrap {
+  position: relative;
+  width: 100%;
+}
+
+.dsh-thr-draft-editor {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 48px;
   max-height: 150px;
-  min-height: 44px;
-}
-
-.dsh-thr-composer-quotes {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  max-height: 110px;
   overflow-y: auto;
-}
-
-.dsh-thr-composer-quote {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 6px;
-  padding: 4px 7px;
-  border-left: 2px solid var(--dsw-alias-brand-primary, #3b82f6);
-  background: var(--dsw-alias-bg-layer-2, rgba(128, 128, 128, 0.08));
-  border-radius: 0 6px 6px 0;
-  font-size: 11.5px;
-  color: var(--dsw-alias-label-secondary, rgba(128, 128, 128, 0.9));
-}
-
-.dsh-thr-composer-quote-text {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--dsw-alias-label-primary, inherit);
+  background: var(--dsw-alias-bg-layer-3, var(--dsw-alias-bg-base, transparent));
+  border: 1px solid var(--dsw-alias-border-l2, rgba(128, 128, 128, 0.28));
+  border-radius: 7px;
+  padding: 6px 8px;
   white-space: pre-wrap;
   word-break: break-word;
+  outline: none;
+}
+
+.dsh-thr-draft-editor:focus {
+  border-color: var(--dsw-alias-brand-primary, #3b82f6);
+}
+
+.dsh-thr-draft-editor[data-empty="true"]::before {
+  content: attr(data-placeholder);
+  color: var(--dsw-alias-label-tertiary, rgba(128, 128, 128, 0.68));
+  pointer-events: none;
+}
+
+.dsh-thr-quote-chip {
+  position: relative;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  box-sizing: border-box;
+  max-width: min(85%, 260px);
+  margin: 0 2px;
+  padding: 0;
+  vertical-align: baseline;
+  color: var(--dsw-alias-state-business-primary, var(--dsw-alias-brand-primary, #3b82f6));
+  font-size: inherit;
+  line-height: inherit;
+}
+
+.dsh-thr-quote-marker,
+.dsh-thr-quote-remove {
+  display: inline-grid;
+  place-items: center;
+  align-self: center;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  color: inherit;
+  user-select: none;
+}
+
+.dsh-thr-quote-marker {
+  pointer-events: none;
+}
+
+.dsh-thr-quote-remove {
+  appearance: none;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  cursor: pointer;
+}
+
+.dsh-thr-quote-mark,
+.dsh-thr-quote-close {
+  grid-area: 1 / 1;
+  transition: opacity 0.12s ease;
+}
+
+.dsh-thr-quote-close {
+  opacity: 0;
+}
+
+.dsh-thr-quote-chip[data-removable]:hover .dsh-thr-quote-mark,
+.dsh-thr-quote-chip[data-removable]:focus-within .dsh-thr-quote-mark {
+  opacity: 0;
+}
+
+.dsh-thr-quote-chip[data-removable]:hover .dsh-thr-quote-close,
+.dsh-thr-quote-chip[data-removable]:focus-within .dsh-thr-quote-close {
+  opacity: 1;
+}
+
+.dsh-thr-quote-source {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dsh-thr-quote-hover {
+  position: absolute;
+  z-index: 40;
+  left: 0;
+  bottom: calc(100% + 6px);
+  width: max-content;
+  max-width: min(280px, 80vw);
+  max-height: 180px;
+  overflow-y: auto;
+  padding: 7px 9px;
+  border-radius: 8px;
+  background: var(--dsw-specific-menu, var(--dsw-alias-bg-layer-1, #1e1e1e));
+  border: 1px solid var(--dsw-alias-border-l2, rgba(128, 128, 128, 0.3));
+  box-shadow: var(--dsw-elevation-panel, 0 8px 24px rgba(0, 0, 0, 0.25));
+  color: var(--dsw-alias-label-primary, inherit);
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+  pointer-events: none;
+}
+
+.dsh-thr-draft-wrap > .dsh-thr-quote-hover {
+  bottom: auto;
+  transform: translateY(-100%);
 }
 
 .dsh-thr-card {
@@ -480,9 +571,9 @@ const CSS_TEXT = `
 }
 
 .dsh-thr-user-content {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+  display: block;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .dsh-thr-user-text {
@@ -490,8 +581,109 @@ const CSS_TEXT = `
   word-break: break-word;
 }
 
-.dsh-thr-user-quote {
-  background: color-mix(in srgb, var(--dsw-alias-bg-base, transparent) 55%, rgba(128, 128, 128, 0.1));
+.dsh-thr-tools-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.dsh-thr-tool-row {
+  border: 1px solid var(--dsw-alias-border-l2, rgba(128, 128, 128, 0.22));
+  border-radius: 7px;
+  padding: 4px 7px;
+  background: var(--dsw-alias-bg-layer-2, rgba(128, 128, 128, 0.05));
+  font-size: 11.5px;
+}
+
+.dsh-thr-tool-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  min-width: 0;
+  list-style: none;
+}
+
+.dsh-thr-tool-summary::-webkit-details-marker {
+  display: none;
+}
+
+.dsh-thr-tool-status {
+  flex-shrink: 0;
+  font-size: 10.5px;
+  padding: 0 5px;
+  border-radius: 999px;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(128, 128, 128, 0.25));
+  color: var(--dsw-alias-label-secondary, rgba(128, 128, 128, 0.9));
+}
+
+.dsh-thr-tool-status-running {
+  border-color: color-mix(in srgb, var(--dsw-alias-brand-primary, #3b82f6) 45%, transparent);
+  color: var(--dsw-alias-brand-primary, #3b82f6);
+}
+
+.dsh-thr-tool-status-done {
+  border-color: color-mix(in srgb, var(--dsw-alias-state-success-primary, #16a34a) 45%, transparent);
+  color: var(--dsw-alias-state-success-primary, #16a34a);
+}
+
+.dsh-thr-tool-status-error {
+  border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary, #dc2626) 45%, transparent);
+  color: var(--dsw-alias-state-error-primary, #dc2626);
+}
+
+.dsh-thr-tool-arg {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-secondary, rgba(128, 128, 128, 0.9));
+}
+
+.dsh-thr-tool-body {
+  margin-top: 5px;
+  padding-top: 5px;
+  border-top: 1px solid var(--dsw-alias-border-l2, rgba(128, 128, 128, 0.16));
+  max-height: 140px;
+  overflow-y: auto;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--dsw-alias-label-secondary, rgba(128, 128, 128, 0.9));
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.dsh-thr-tools-toggle {
+  appearance: none;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.2;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(128, 128, 128, 0.28));
+  background: transparent;
+  color: var(--dsw-alias-label-secondary, rgba(128, 128, 128, 0.9));
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.dsh-thr-tools-toggle:hover:not(:disabled) {
+  color: var(--dsw-alias-label-primary, inherit);
+  background: var(--dsw-alias-interactive-bg-hover, rgba(128, 128, 128, 0.1));
+}
+
+.dsh-thr-tools-toggle:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.dsh-thr-tools-toggle-on {
+  border-color: color-mix(in srgb, var(--dsw-alias-brand-primary, #3b82f6) 50%, transparent);
+  background: color-mix(in srgb, var(--dsw-alias-brand-primary, #3b82f6) 12%, transparent);
+  color: var(--dsw-alias-brand-primary, #3b82f6);
+  font-weight: 500;
 }
 
 .dsh-thr-msg-assistant {
@@ -801,15 +993,26 @@ const CSS_TEXT = `
 }
 `
 
-export function ensureThreadsStyles(): void {
-  if (typeof document === 'undefined') return
-  const existing = document.getElementById(STYLE_ELEMENT_ID)
-  if (existing instanceof HTMLStyleElement) {
-    existing.textContent = CSS_TEXT
-    return
+export function ensureThreadsStyles(): () => void {
+  if (typeof document === 'undefined') {
+    return () => {}
   }
-  const style = document.createElement('style')
-  style.id = STYLE_ELEMENT_ID
+  const existing = document.getElementById(STYLE_ELEMENT_ID)
+  const isStyle =
+    existing !== null &&
+    (typeof HTMLStyleElement !== 'undefined'
+      ? existing instanceof HTMLStyleElement
+      : existing.tagName?.toUpperCase() === 'STYLE')
+  const style = isStyle ? existing : document.createElement('style')
+  if (!isStyle) {
+    style.id = STYLE_ELEMENT_ID
+    document.head.appendChild(style)
+  }
+  style.setAttribute('data-plugin', 'dsh-threads')
   style.textContent = CSS_TEXT
-  document.head.appendChild(style)
+  return () => {
+    if (style.parentNode) {
+      style.remove()
+    }
+  }
 }

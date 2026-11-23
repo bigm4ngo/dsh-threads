@@ -9,16 +9,14 @@ import type {
 } from '../shared/types.ts'
 import { ApiError, threadsApi } from './api.ts'
 import { copyTextToClipboard } from './clipboard.ts'
-import { queueDraft } from './draft-bridge.ts'
+import { queueDraft, queueQuote } from './draft-bridge.ts'
 import type { DshClientContext } from './dsh-types.ts'
 import { SimpleMarkdown } from './markdown.tsx'
 import { MergeBackDrawer } from './MergeBackDrawer.tsx'
 import { formatModelBadge, ModelPickerRow } from './ModelPickerRow.tsx'
-import {
-  formatQuotedSideChatPrompt,
-  normalizeQuotedText,
-  parseQuotedUserText,
-} from './side-chat-quote.ts'
+import { QuoteChip } from './QuoteChip.tsx'
+import { parseQuotedUserText } from './side-chat-quote.ts'
+import { SideChatDraftEditor, type SideChatDraftHandle } from './SideChatDraftEditor.tsx'
 import type { SideChatStreamBuffer } from './ThreadsTab.tsx'
 
 interface SideSelectionPopoverState {
@@ -27,6 +25,8 @@ interface SideSelectionPopoverState {
   top: number
   placement: 'above' | 'below'
 }
+
+type PopoverFlashState = 'copied' | 'quoted-main' | null
 
 function CopyIcon() {
   return (
@@ -115,6 +115,10 @@ function pickVisibleSelectionRect(range: Range, rootRect: DOMRect): DOMRect | nu
   return fallback
 }
 
+function normalizeSelectedText(raw: string): string {
+  return raw.replace(/\r\n?/g, '\n').trim().slice(0, 4000)
+}
+
 export function SideChatView({
   ctx,
   sessionId,
@@ -151,9 +155,9 @@ export function SideChatView({
   streamingBuffers: Record<string, SideChatStreamBuffer>
 }) {
   const activeChat = sideChats.find((c) => c.id === selectedSideChatId) ?? sideChats[0] ?? null
-  const [composer, setComposer] = useState('')
-  const [composerQuotes, setComposerQuotes] = useState<string[]>([])
+  const [hasDraftContent, setHasDraftContent] = useState(false)
   const [newModel, setNewModel] = useState<ModelSelectionSpec | undefined>(defaultModel)
+  const [newToolsEnabled, setNewToolsEnabled] = useState(true)
   const [creating, setCreating] = useState(false)
   const [sending, setSending] = useState(false)
   const [stopping, setStopping] = useState(false)
@@ -165,32 +169,35 @@ export function SideChatView({
   const [promoteMode, setPromoteMode] = useState<WorkspaceMode>('same')
   const [promoteRunningConflict, setPromoteRunningConflict] = useState(false)
   const [selectionPopover, setSelectionPopover] = useState<SideSelectionPopoverState | null>(null)
-  const [popoverCopied, setPopoverCopied] = useState(false)
+  const [popoverFlash, setPopoverFlash] = useState<PopoverFlashState>(null)
 
   const shellRef = useRef<HTMLDivElement>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
-  const composerRef = useRef<HTMLTextAreaElement>(null)
+  const draftEditorRef = useRef<SideChatDraftHandle>(null)
   const popoverRef = useRef<HTMLDivElement>(null)
   const nearBottomRef = useRef(true)
-  const popoverCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const popoverCopiedRef = useRef(false)
-  popoverCopiedRef.current = popoverCopied
+  const popoverFlashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const popoverFlashRef = useRef<PopoverFlashState>(null)
+  popoverFlashRef.current = popoverFlash
+
+  const effectiveToolsEnabled =
+    activeChat && !pendingQuote ? activeChat.toolsEnabled !== false : newToolsEnabled
 
   const dismissPopover = useCallback(() => {
-    if (popoverCopyTimerRef.current) {
-      clearTimeout(popoverCopyTimerRef.current)
-      popoverCopyTimerRef.current = null
+    if (popoverFlashTimerRef.current) {
+      clearTimeout(popoverFlashTimerRef.current)
+      popoverFlashTimerRef.current = null
     }
-    popoverCopiedRef.current = false
-    setPopoverCopied(false)
+    popoverFlashRef.current = null
+    setPopoverFlash(null)
     setSelectionPopover((prev) => (prev ? null : prev))
   }, [])
 
   useEffect(() => {
     return () => {
-      if (popoverCopyTimerRef.current) {
-        clearTimeout(popoverCopyTimerRef.current)
+      if (popoverFlashTimerRef.current) {
+        clearTimeout(popoverFlashTimerRef.current)
       }
     }
   }, [])
@@ -209,7 +216,6 @@ export function SideChatView({
     setConfirmDeleteId(null)
     setDeleting(false)
     setError(null)
-    setComposerQuotes([])
     dismissPopover()
     nearBottomRef.current = true
   }, [activeChat?.id, sessionId, dismissPopover])
@@ -269,7 +275,7 @@ export function SideChatView({
     if (container) {
       container.scrollTop = container.scrollHeight
     }
-  }, [activeStreamBuf?.text, activeStreamBuf?.reasoning])
+  }, [activeStreamBuf?.text, activeStreamBuf?.reasoning, activeStreamBuf?.toolCalls.length])
 
   useEffect(() => {
     if (typeof document === 'undefined' || typeof window === 'undefined') return
@@ -294,7 +300,7 @@ export function SideChatView({
         return
       }
 
-      const text = normalizeQuotedText(sel.toString())
+      const text = normalizeSelectedText(sel.toString())
       if (!text) {
         dismissPopover()
         return
@@ -309,7 +315,7 @@ export function SideChatView({
 
       const shellRect = shell.getBoundingClientRect()
       const rawLeft = rect.left + rect.width / 2 - shellRect.left
-      const pad = Math.min(78, shellRect.width / 2)
+      const pad = Math.min(126, shellRect.width / 2)
       const left = Math.max(pad, Math.min(shellRect.width - pad, rawLeft))
       const topAbove = rect.top - shellRect.top - 8
       const placement: 'above' | 'below' = topAbove < 36 ? 'below' : 'above'
@@ -318,12 +324,12 @@ export function SideChatView({
           ? Math.min(shellRect.height - 12, rect.bottom - shellRect.top + 8)
           : topAbove
 
-      if (popoverCopyTimerRef.current) {
-        clearTimeout(popoverCopyTimerRef.current)
-        popoverCopyTimerRef.current = null
+      if (popoverFlashTimerRef.current) {
+        clearTimeout(popoverFlashTimerRef.current)
+        popoverFlashTimerRef.current = null
       }
-      popoverCopiedRef.current = false
-      setPopoverCopied(false)
+      popoverFlashRef.current = null
+      setPopoverFlash(null)
       setSelectionPopover({ text, left, top, placement })
     }
 
@@ -336,7 +342,7 @@ export function SideChatView({
     }
 
     const handleSelectionChange = () => {
-      if (popoverCopiedRef.current) return
+      if (popoverFlashRef.current !== null) return
       const root = scrollContainerRef.current
       const sel = window.getSelection()
       if (!root || !sel || sel.isCollapsed || sel.rangeCount === 0) {
@@ -350,7 +356,7 @@ export function SideChatView({
         !startSource ||
         startSource !== endSource ||
         !root.contains(startSource) ||
-        !normalizeQuotedText(sel.toString())
+        !normalizeSelectedText(sel.toString())
       ) {
         setSelectionPopover((prev) => (prev ? null : prev))
       }
@@ -394,22 +400,35 @@ export function SideChatView({
   const handleQuoteSelection = () => {
     if (!selectionPopover) return
     const snippet = selectionPopover.text
-    setComposerQuotes((prev) => [...prev, snippet])
     window.getSelection()?.removeAllRanges()
     dismissPopover()
-    composerRef.current?.focus()
+    draftEditorRef.current?.insertQuote(snippet)
+  }
+
+  const handleQuoteToMain = () => {
+    if (!selectionPopover || !sessionId) return
+    queueQuote(sessionId, selectionPopover.text)
+    popoverFlashRef.current = 'quoted-main'
+    setPopoverFlash('quoted-main')
+    if (popoverFlashTimerRef.current) {
+      clearTimeout(popoverFlashTimerRef.current)
+    }
+    popoverFlashTimerRef.current = setTimeout(() => {
+      window.getSelection()?.removeAllRanges()
+      dismissPopover()
+    }, 600)
   }
 
   const handleCopySelection = () => {
     if (!selectionPopover) return
     void copyTextToClipboard(selectionPopover.text).then((ok) => {
       if (!ok) return
-      popoverCopiedRef.current = true
-      setPopoverCopied(true)
-      if (popoverCopyTimerRef.current) {
-        clearTimeout(popoverCopyTimerRef.current)
+      popoverFlashRef.current = 'copied'
+      setPopoverFlash('copied')
+      if (popoverFlashTimerRef.current) {
+        clearTimeout(popoverFlashTimerRef.current)
       }
-      popoverCopyTimerRef.current = setTimeout(() => {
+      popoverFlashTimerRef.current = setTimeout(() => {
         window.getSelection()?.removeAllRanges()
         dismissPopover()
       }, 600)
@@ -426,13 +445,13 @@ export function SideChatView({
         ...(pendingAnchorTurn !== undefined ? { anchorTurn: pendingAnchorTurn } : {}),
         ...(pendingAnchorSeq !== undefined ? { anchorSeq: pendingAnchorSeq } : {}),
         ...(newModel ?? defaultModel ? { model: newModel ?? defaultModel } : {}),
+        toolsEnabled: newToolsEnabled,
       })
       onClearPendingQuote?.()
       onSideChatUpsert(created)
       onSelectSideChat(created.id)
-      setComposerQuotes([])
       dismissPopover()
-      composerRef.current?.focus()
+      draftEditorRef.current?.focus()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -441,7 +460,7 @@ export function SideChatView({
   }
 
   const handleSend = async () => {
-    const text = formatQuotedSideChatPrompt(composerQuotes, composer)
+    const text = draftEditorRef.current?.getValue().trim() ?? ''
     if (!text || sending || activeIsStreaming) return
     setSending(true)
     setError(null)
@@ -454,9 +473,9 @@ export function SideChatView({
           ...(pendingAnchorTurn !== undefined ? { anchorTurn: pendingAnchorTurn } : {}),
           ...(pendingAnchorSeq !== undefined ? { anchorSeq: pendingAnchorSeq } : {}),
           ...(newModel ?? defaultModel ? { model: newModel ?? defaultModel } : {}),
+          toolsEnabled: effectiveToolsEnabled,
         })
-        setComposer('')
-        setComposerQuotes([])
+        draftEditorRef.current?.clear()
         onClearPendingQuote?.()
         onSideChatUpsert(created)
         onSelectSideChat(created.id)
@@ -464,9 +483,9 @@ export function SideChatView({
         const updated = await threadsApi.sendSideChatMessage(activeChat.id, {
           text,
           model: activeChat.model,
+          toolsEnabled: effectiveToolsEnabled,
         })
-        setComposer('')
-        setComposerQuotes([])
+        draftEditorRef.current?.clear()
         onSideChatUpsert(updated)
       }
     } catch (err) {
@@ -481,6 +500,19 @@ export function SideChatView({
     if (activeChat && !pendingQuote) {
       try {
         const updated = await threadsApi.updateSideChat(activeChat.id, { model: next })
+        onSideChatUpsert(updated)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err))
+      }
+    }
+  }
+
+  const handleToolsToggle = async () => {
+    const next = !effectiveToolsEnabled
+    setNewToolsEnabled(next)
+    if (activeChat && !pendingQuote) {
+      try {
+        const updated = await threadsApi.updateSideChat(activeChat.id, { toolsEnabled: next })
         onSideChatUpsert(updated)
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err))
@@ -683,7 +715,8 @@ export function SideChatView({
 
         {!activeChat && !pendingQuote && (
           <div className="dsh-thr-muted">
-            Ask a question below to start a read-only side chat (kept out of main history &amp; sidebar).
+            Ask a question below to start a read-only side chat (kept out of main history &amp;
+            sidebar).
           </div>
         )}
 
@@ -696,6 +729,10 @@ export function SideChatView({
                 const liveBuf = msg.streaming ? streamingBuffers[msg.id] : undefined
                 const displayText = liveBuf ? liveBuf.text : msg.text
                 const displayReasoning = liveBuf ? liveBuf.reasoning : (msg.reasoning ?? '')
+                const displayToolCalls =
+                  liveBuf && liveBuf.toolCalls.length > 0
+                    ? liveBuf.toolCalls
+                    : (msg.toolCalls ?? [])
                 const isUser = msg.role === 'user'
 
                 if (isUser) {
@@ -704,20 +741,16 @@ export function SideChatView({
                     <div key={msg.id} className="dsh-thr-msg-wrap dsh-thr-msg-wrap-user">
                       <div className="dsh-thr-msg dsh-thr-msg-user">
                         <div className="dsh-thr-user-content" data-dsh-thr-side-msg={msg.id}>
-                          {segments.map((seg, idx) =>
-                            seg.kind === 'quote' ? (
-                              <blockquote
-                                key={idx}
-                                className="dsh-thr-blockquote dsh-thr-user-quote"
-                              >
-                                {seg.text}
-                              </blockquote>
-                            ) : (
-                              <div key={idx} className="dsh-thr-user-text">
-                                {seg.text}
-                              </div>
-                            ),
-                          )}
+                          {segments.map((seg, idx) => (
+                            <span key={idx}>
+                              {idx > 0 ? ' ' : null}
+                              {seg.kind === 'quote' ? (
+                                <QuoteChip text={seg.text} />
+                              ) : (
+                                <span className="dsh-thr-user-text">{seg.text}</span>
+                              )}
+                            </span>
+                          ))}
                         </div>
                       </div>
                       {msg.text.trim().length > 0 && (
@@ -763,12 +796,40 @@ export function SideChatView({
                           </div>
                         </details>
                       )}
+                      {displayToolCalls.length > 0 && (
+                        <div className="dsh-thr-tools-list" data-dsh-thr-sel-exclude="">
+                          {displayToolCalls.map((tc) => (
+                            <details key={tc.id} className="dsh-thr-tool-row">
+                              <summary className="dsh-thr-tool-summary">
+                                <span
+                                  className={`dsh-thr-tool-status dsh-thr-tool-status-${tc.status}`}
+                                >
+                                  {tc.status === 'running'
+                                    ? 'Running'
+                                    : tc.status === 'error'
+                                      ? 'Error'
+                                      : 'Done'}
+                                </span>
+                                <span className="dsh-thr-mono">{tc.name}</span>
+                                <span className="dsh-thr-tool-arg" title={tc.summary}>
+                                  {tc.summary}
+                                </span>
+                              </summary>
+                              {(tc.outputPreview || tc.error) && (
+                                <div className="dsh-thr-tool-body">
+                                  {tc.error || tc.outputPreview}
+                                </div>
+                              )}
+                            </details>
+                          ))}
+                        </div>
+                      )}
                       {displayText ? (
                         <div className="dsh-thr-stream-text" data-dsh-thr-side-msg={msg.id}>
                           <SimpleMarkdown text={displayText} />
                           {msg.streaming && <span className="dsh-thr-cursor" aria-hidden="true" />}
                         </div>
-                      ) : msg.streaming && !displayReasoning ? (
+                      ) : msg.streaming && !displayReasoning && displayToolCalls.length === 0 ? (
                         <span className="dsh-thr-faint" data-dsh-thr-sel-exclude="">
                           Thinking…
                         </span>
@@ -895,44 +956,16 @@ export function SideChatView({
         )}
 
         <div className="dsh-thr-card dsh-thr-side-composer">
-          {composerQuotes.length > 0 && (
-            <div className="dsh-thr-composer-quotes">
-              {composerQuotes.map((q, idx) => (
-                <div key={`${idx}-${q.slice(0, 24)}`} className="dsh-thr-composer-quote" title={q}>
-                  <span className="dsh-thr-composer-quote-text">{q}</span>
-                  <button
-                    type="button"
-                    className="dsh-thr-btn-xs"
-                    aria-label="Remove quote"
-                    onClick={() =>
-                      setComposerQuotes((prev) => prev.filter((_, itemIdx) => itemIdx !== idx))
-                    }
-                  >
-                    ×
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-
-          <textarea
-            ref={composerRef}
-            className="dsh-thr-textarea dsh-thr-side-textarea"
-            rows={2}
-            value={composer}
-            onChange={(e) => setComposer(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-                e.preventDefault()
-                void handleSend()
-              }
-            }}
+          <SideChatDraftEditor
+            ref={draftEditorRef}
+            disabled={sending}
             placeholder={
               pendingQuote
                 ? 'Ask about the selected passage… (Enter sends)'
                 : 'Ask a side question without touching the main session…'
             }
-            disabled={sending}
+            onHasContentChange={setHasDraftContent}
+            onSubmit={() => void handleSend()}
           />
 
           <ModelPickerRow
@@ -945,6 +978,19 @@ export function SideChatView({
 
           <div className="dsh-thr-between">
             <div className="dsh-thr-row">
+              <button
+                type="button"
+                className={
+                  effectiveToolsEnabled
+                    ? 'dsh-thr-tools-toggle dsh-thr-tools-toggle-on'
+                    : 'dsh-thr-tools-toggle'
+                }
+                disabled={activeIsStreaming || sending}
+                onClick={() => void handleToolsToggle()}
+                title="Allow strictly read-only research tools (web_search, web_fetch, read, glob, grep, skill) on supported model routes; Claude Code side calls run text-only."
+              >
+                {effectiveToolsEnabled ? 'Tools: Research' : 'Tools: Off'}
+              </button>
               {activeChat && !pendingQuote && activeChat.messages.length > 0 && (
                 <>
                   <button
@@ -989,9 +1035,7 @@ export function SideChatView({
               <button
                 type="button"
                 className="dsh-thr-btn dsh-thr-btn-primary"
-                disabled={
-                  (!composer.trim() && composerQuotes.length === 0) || sending || activeIsStreaming
-                }
+                disabled={!hasDraftContent || sending || activeIsStreaming}
                 onClick={() => void handleSend()}
               >
                 {sending ? 'Sending…' : 'Ask'}
@@ -1026,9 +1070,17 @@ export function SideChatView({
             type="button"
             className="dsh-thr-side-sel-btn"
             onPointerDown={(e) => e.preventDefault()}
+            onClick={handleQuoteToMain}
+          >
+            {popoverFlash === 'quoted-main' ? 'Quoted' : 'Quote to main'}
+          </button>
+          <button
+            type="button"
+            className="dsh-thr-side-sel-btn"
+            onPointerDown={(e) => e.preventDefault()}
             onClick={handleCopySelection}
           >
-            {popoverCopied ? 'Copied' : 'Copy'}
+            {popoverFlash === 'copied' ? 'Copied' : 'Copy'}
           </button>
         </div>
       )}

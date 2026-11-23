@@ -4,3 +4,4 @@ node_modules/
 
 # local verification rig and throw-away probes; not shipped
 .scratch/
+.lib-staging-*/

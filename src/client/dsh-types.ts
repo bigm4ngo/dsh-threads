@@ -143,6 +143,7 @@ export interface SidebarRightTabProps {
 }
 
 export interface DshClientContext {
+  effect(execute: () => (() => void | Promise<void>) | void, label?: string): () => void
   slots: {
     inject(slotName: string, factory: () => (() => void) | void | null): () => void
     register(meta: Record<string, unknown>, component: unknown): () => void

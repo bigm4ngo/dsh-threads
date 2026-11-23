@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  formatQuoteBlock,
   formatQuotedSideChatPrompt,
   parseQuotedUserText,
+  serializeDraftSegments,
   SIDE_CHAT_QUOTE_MAX,
 } from './side-chat-quote.ts'
 
@@ -24,16 +26,48 @@ test('formatQuotedSideChatPrompt formats single, multi-line, and multiple quotes
     formatQuotedSideChatPrompt(['first quote', 'second quote'], 'Compare these'),
     '> first quote\n\n> second quote\n\nCompare these',
   )
-  assert.equal(
-    formatQuotedSideChatPrompt(['only quote'], ''),
-    '> only quote',
-  )
+  assert.equal(formatQuotedSideChatPrompt(['only quote'], ''), '> only quote')
+  assert.equal(formatQuoteBlock('a\nb'), '> a\n> b')
 })
 
 test('formatQuotedSideChatPrompt truncates long quotes at SIDE_CHAT_QUOTE_MAX', () => {
   const huge = 'a'.repeat(SIDE_CHAT_QUOTE_MAX + 500)
   const formatted = formatQuotedSideChatPrompt([huge], 'Short question')
   assert.equal(formatted, `> ${'a'.repeat(SIDE_CHAT_QUOTE_MAX)}\n\nShort question`)
+})
+
+test('serializeDraftSegments coalesces text and round-trips inline quotes', () => {
+  assert.equal(
+    serializeDraftSegments([
+      { kind: 'text', text: 'Look at ' },
+      { kind: 'quote', text: 'alpha\nbeta' },
+      { kind: 'text', text: ' and ' },
+      { kind: 'text', text: 'explain' },
+    ]),
+    'Look at\n\n> alpha\n> beta\n\nand explain',
+  )
+
+  assert.equal(
+    serializeDraftSegments([
+      { kind: 'quote', text: 'one' },
+      { kind: 'text', text: '   ' },
+      { kind: 'quote', text: 'two' },
+    ]),
+    '> one\n\n> two',
+  )
+
+  assert.equal(serializeDraftSegments([{ kind: 'text', text: '  \n\t ' }]), '')
+
+  const wired = serializeDraftSegments([
+    { kind: 'text', text: 'Context:' },
+    { kind: 'quote', text: 'line 1\n\nline 2' },
+    { kind: 'text', text: 'What next?' },
+  ])
+  assert.deepEqual(parseQuotedUserText(wired), [
+    { kind: 'text', text: 'Context:' },
+    { kind: 'quote', text: 'line 1\n\nline 2' },
+    { kind: 'text', text: 'What next?' },
+  ])
 })
 
 test('parseQuotedUserText keeps plain messages intact including inline >', () => {
@@ -53,14 +87,5 @@ test('parseQuotedUserText splits leading, multi-line, and interleaved quotes cle
     { kind: 'text', text: 'Context:' },
     { kind: 'quote', text: 'quoted line' },
     { kind: 'text', text: 'Follow up' },
-  ])
-})
-
-test('parseQuotedUserText round-trips formatQuotedSideChatPrompt output', () => {
-  const wired = formatQuotedSideChatPrompt(['line 1\n\nline 2', 'second'], 'Explain')
-  assert.deepEqual(parseQuotedUserText(wired), [
-    { kind: 'quote', text: 'line 1\n\nline 2' },
-    { kind: 'quote', text: 'second' },
-    { kind: 'text', text: 'Explain' },
   ])
 })

@@ -26,6 +26,7 @@ import type {
   SessionTreeResponse,
   SideChat,
   SideChatMessage,
+  SideChatToolCall,
   TreeSessionNode,
   TurnSummary,
   UpdateSideChatRequest,
@@ -41,6 +42,16 @@ import {
   type RawSessionEvent,
 } from './extractor.ts'
 import { createIsolatedWorktree, inspectGitRepo } from './git.ts'
+import {
+  type AgentsServiceLike,
+  resolveSideChatToolchain,
+  type SideChatToolchain,
+  type SideChatToolSchema,
+  type SkillRegistryLike,
+  summarizeToolCall,
+  type ToolsServiceLike,
+  type WebServiceLike,
+} from './side-chat-tools.ts'
 import type { ThreadsStore } from './store.ts'
 
 export class HttpError extends Error {
@@ -157,16 +168,37 @@ export interface SessionControllerLike {
 export interface LlmChunkLike {
   type: string
   index?: number
+  id?: string
+  name?: string
   text?: string
-  block?: { type?: string; text?: string }
+  argumentsDelta?: string
+  block?: {
+    type?: string
+    text?: string
+    id?: string
+    name?: string
+    arguments?: string
+  }
+  replayState?: unknown
   reason?: { kind?: string; failure?: { message?: string } }
 }
+
+export type LlmContentBlockLike =
+  | { type: 'text'; text: string }
+  | { type: 'reasoning'; text: string }
+  | { type: 'tool-call'; id: string; name: string; arguments: string }
 
 export type LlmRequestMessageLike =
   | {
       id: string
       role: 'user'
-      source: { kind: 'user' }
+      source:
+        | { kind: 'user' }
+        | {
+            kind: 'runtime-context'
+            form: 'snapshot'
+            sections: Array<{ name: string; text: string }>
+          }
       content: Array<{ type: 'text'; text: string }>
     }
   | {
@@ -178,7 +210,15 @@ export type LlmRequestMessageLike =
         model: string
         replayState?: unknown
       }
+      content: LlmContentBlockLike[]
+    }
+  | {
+      id: string
+      role: 'tool'
+      toolCallId: string
+      source: { kind: 'tool'; callId: string }
       content: Array<{ type: 'text'; text: string }>
+      isError?: boolean
     }
 
 export interface LlmGenerateOptionsLike {
@@ -189,6 +229,7 @@ export interface LlmGenerateOptionsLike {
   maxTokens?: number
   system?: string
   messages: LlmRequestMessageLike[]
+  tools?: SideChatToolSchema[]
   signal?: AbortSignal
   sessionId?: string
   purpose?: string
@@ -283,6 +324,10 @@ export interface ThreadsServiceDeps {
   workspaceRegistry?: WorkspaceRegistryLike
   permissionPresets?: PermissionPresetsLike
   sessions?: SessionsServiceLike
+  tools?: ToolsServiceLike
+  web?: WebServiceLike
+  skills?: SkillRegistryLike
+  agents?: AgentsServiceLike
   logger?: {
     info?(message: string): void
     warn?(message: string): void
@@ -334,6 +379,7 @@ async function isDirectory(dirPath: string): Promise<boolean> {
 }
 
 const MAX_PERSISTED_REASONING_CHARS = 16_000
+const MAX_SIDE_CHAT_TOOL_ROUNDS = 8
 
 interface LlmHistoryEntry {
   id?: string
@@ -347,6 +393,7 @@ interface ActiveSideChatStream {
   controller: AbortController
   text: string
   reasoning: string
+  toolCalls: SideChatToolCall[]
   seq: number
   done: Promise<SideChat>
 }
@@ -419,6 +466,51 @@ function buildSideChatLlmHistory(
     }
   }
   return coalesced
+}
+
+function isRecoverableSingleTurnToolFailure(errorMsg: string, reasoning: string): boolean {
+  if (/\b(?:reached\s+)?maximum number of turns\b|\bmax[-_\s]?turns\b/i.test(errorMsg)) {
+    return true
+  }
+  if (/permission.*not granted|tool.*denied|denied\s+mcp__/i.test(errorMsg)) {
+    return true
+  }
+  if (/⚠\s*Denied\b|permission.*not granted/i.test(reasoning)) {
+    return true
+  }
+  return false
+}
+
+function appendNoToolsRetryNote(messages: readonly LlmRequestMessageLike[]): LlmRequestMessageLike[] {
+  const copy: LlmRequestMessageLike[] = messages.map((m): LlmRequestMessageLike => {
+    if (m.role === 'user') {
+      return {
+        ...m,
+        content: m.content.map((b) => ({ ...b })),
+      }
+    }
+    if (m.role === 'assistant') {
+      return {
+        ...m,
+        content: m.content.map((b) => ({ ...b })),
+      }
+    }
+    return {
+      ...m,
+      content: m.content.map((b) => ({ ...b })),
+    }
+  })
+  for (let i = copy.length - 1; i >= 0; i -= 1) {
+    const msg = copy[i]
+    if (msg.role === 'user') {
+      msg.content.push({
+        type: 'text',
+        text: '\n\n[Note: Tool and MCP calls are unavailable for this reply. Do not call any tools; answer directly in text.]',
+      })
+      return copy
+    }
+  }
+  return copy
 }
 
 export class ThreadsService {
@@ -901,6 +993,9 @@ export class ThreadsService {
         if (active.reasoning) {
           msg.reasoning = active.reasoning
         }
+        if (active.toolCalls.length > 0) {
+          msg.toolCalls = active.toolCalls.map((t) => ({ ...t }))
+        }
         msg.streamSeq = active.seq
         changed = true
       } else {
@@ -963,6 +1058,7 @@ export class ThreadsService {
       contextTurnCount,
       contextSummary,
       model: chosenModel,
+      toolsEnabled: req.toolsEnabled ?? true,
       messages: [],
       createdAt: now,
       updatedAt: now,
@@ -981,6 +1077,7 @@ export class ThreadsService {
         {
           text: req.question.trim(),
           model: chosenModel,
+          ...(req.toolsEnabled !== undefined ? { toolsEnabled: req.toolsEnabled } : {}),
         },
         options,
       )
@@ -996,6 +1093,9 @@ export class ThreadsService {
       }
       if (req.model?.provider && req.model?.model) {
         next.model = req.model
+      }
+      if (typeof req.toolsEnabled === 'boolean') {
+        next.toolsEnabled = req.toolsEnabled
       }
       next.updatedAt = Date.now()
       return next
@@ -1030,15 +1130,41 @@ export class ThreadsService {
     return true
   }
 
-  private async streamLlmText(options: {
+  private async resolveSideChatWorkspaceAndAgent(
+    parentSessionId: string,
+  ): Promise<{ cwd?: string; agent?: unknown }> {
+    let cwd = this.deps.sessions?.get(parentSessionId)?.header?.cwd
+    let agent = this.deps.agents?.get?.(parentSessionId)
+
+    if (!agent && this.deps.tools && typeof this.deps.sessionController.resolveAgent === 'function') {
+      const resolved = await this.deps.sessionController.resolveAgent(parentSessionId).catch(() => undefined)
+      if (resolved && 'agent' in resolved) {
+        agent = resolved.agent
+        cwd ??= resolved.agent.session?.header?.cwd
+      }
+    }
+
+    if (!cwd && this.deps.sessionQuery) {
+      const snap = await this.deps.sessionQuery.readSession(parentSessionId).catch(() => undefined)
+      cwd = snap?.session?.cwd
+    }
+
+    return { cwd, agent }
+  }
+
+  private async streamLlmWithTools(options: {
     model: ModelSelectionSpec
     system: string
     messages: LlmHistoryEntry[]
     purpose: string
     antigravitySessionId?: string
+    toolsEnabled: boolean
+    toolchain?: SideChatToolchain
     signal: AbortSignal
     onDelta?: (delta: string) => void
     onReasoningDelta?: (delta: string) => void
+    onToolCall?: (toolCall: SideChatToolCall) => void
+    onRetryReset?: () => void
   }): Promise<{ text: string; reasoning: string; model: ModelSelectionSpec }> {
     const resolvedConfig = await this.deps.llm.resolveCallConfig({
       provider: options.model.provider,
@@ -1073,6 +1199,19 @@ export class ThreadsService {
           },
     )
 
+    if (isAgy && options.toolsEnabled) {
+      llmMessages.unshift({
+        id: randomUUID(),
+        role: 'user',
+        source: {
+          kind: 'runtime-context',
+          form: 'snapshot',
+          sections: [{ name: 'sandbox:policy', text: 'Current DSH file policy: read-only.' }],
+        },
+        content: [{ type: 'text', text: '' }],
+      })
+    }
+
     let preparedConfig: {
       provider: string
       model: string
@@ -1080,78 +1219,251 @@ export class ThreadsService {
       temperature?: number
       maxTokens?: number
     } = resolvedConfig
-    let streamIter: AsyncIterable<LlmChunkLike>
-
-    if (typeof this.deps.llm.prepareCall === 'function') {
-      const prepared = await this.deps.llm.prepareCall(resolvedConfig, options.signal)
-      preparedConfig = prepared.config
-      streamIter = prepared.stream({
-        ...preparedConfig,
-        system: options.system,
-        messages: llmMessages,
-        purpose: options.purpose,
-        signal: options.signal,
-        ...(isAgy && options.antigravitySessionId
-          ? { sessionId: options.antigravitySessionId }
-          : {}),
-      })
-    } else if (typeof this.deps.llm.stream === 'function') {
-      streamIter = this.deps.llm.stream({
-        ...resolvedConfig,
-        system: options.system,
-        messages: llmMessages,
-        purpose: options.purpose,
-        signal: options.signal,
-        ...(isAgy && options.antigravitySessionId
-          ? { sessionId: options.antigravitySessionId }
-          : {}),
-      })
-    } else {
-      throw new Error('LLM service exposes neither prepareCall nor stream')
-    }
 
     let fullText = ''
     let fullReasoning = ''
-    const textDeltaSeenIndexes = new Set<number>()
-    const reasoningDeltaSeenIndexes = new Set<number>()
+    let forceNoTools = false
+    let retriedNoTools = false
+    let effectiveSystem = options.system
 
-    for await (const chunk of streamIter) {
-      if (chunk.type === 'text-delta' && typeof chunk.text === 'string' && chunk.text.length > 0) {
-        if (typeof chunk.index === 'number') textDeltaSeenIndexes.add(chunk.index)
-        fullText += chunk.text
-        options.onDelta?.(chunk.text)
-      } else if (
-        chunk.type === 'reasoning-delta' &&
-        typeof chunk.text === 'string' &&
-        chunk.text.length > 0
-      ) {
-        if (typeof chunk.index === 'number') reasoningDeltaSeenIndexes.add(chunk.index)
-        fullReasoning += chunk.text
-        options.onReasoningDelta?.(chunk.text)
-      } else if (
-        chunk.type === 'block-end' &&
-        chunk.block?.type === 'text' &&
-        typeof chunk.block.text === 'string' &&
-        chunk.block.text.length > 0 &&
-        (typeof chunk.index !== 'number' || !textDeltaSeenIndexes.has(chunk.index))
-      ) {
-        fullText += chunk.block.text
-        options.onDelta?.(chunk.block.text)
-      } else if (
-        chunk.type === 'block-end' &&
-        chunk.block?.type === 'reasoning' &&
-        typeof chunk.block.text === 'string' &&
-        chunk.block.text.length > 0 &&
-        (typeof chunk.index !== 'number' || !reasoningDeltaSeenIndexes.has(chunk.index))
-      ) {
-        fullReasoning += chunk.block.text
-        options.onReasoningDelta?.(chunk.block.text)
-      } else if (chunk.type === 'finish') {
-        const kind = chunk.reason?.kind
-        if (kind === 'error' || kind === 'aborted') {
-          const msg = chunk.reason?.failure?.message || `Model stream ended (${kind})`
-          throw new Error(msg)
+    for (let round = 0; round <= MAX_SIDE_CHAT_TOOL_ROUNDS; round += 1) {
+      options.signal.throwIfAborted()
+
+      const allowToolsThisRound = Boolean(
+        !forceNoTools &&
+          options.toolsEnabled &&
+          options.toolchain &&
+          options.toolchain.schemas.length > 0 &&
+          round < MAX_SIDE_CHAT_TOOL_ROUNDS,
+      )
+      const roundTools = allowToolsThisRound ? options.toolchain!.schemas : undefined
+      const messagesForRound = retriedNoTools ? appendNoToolsRetryNote(llmMessages) : llmMessages
+
+      let streamIter: AsyncIterable<LlmChunkLike>
+      if (typeof this.deps.llm.prepareCall === 'function') {
+        const prepared = await this.deps.llm.prepareCall(resolvedConfig, options.signal)
+        preparedConfig = prepared.config
+        streamIter = prepared.stream({
+          ...preparedConfig,
+          system: effectiveSystem,
+          messages: messagesForRound,
+          ...(roundTools ? { tools: roundTools } : {}),
+          purpose: options.purpose,
+          signal: options.signal,
+          ...(isAgy && options.antigravitySessionId
+            ? { sessionId: options.antigravitySessionId }
+            : {}),
+        })
+      } else if (typeof this.deps.llm.stream === 'function') {
+        streamIter = this.deps.llm.stream({
+          ...resolvedConfig,
+          system: effectiveSystem,
+          messages: messagesForRound,
+          ...(roundTools ? { tools: roundTools } : {}),
+          purpose: options.purpose,
+          signal: options.signal,
+          ...(isAgy && options.antigravitySessionId
+            ? { sessionId: options.antigravitySessionId }
+            : {}),
+        })
+      } else {
+        throw new Error('LLM service exposes neither prepareCall nor stream')
+      }
+
+      const textDeltaSeenIndexes = new Set<number>()
+      const reasoningDeltaSeenIndexes = new Set<number>()
+      let stepText = ''
+      let stepReasoning = ''
+      let needParagraphBreak = fullText.length > 0 && !fullText.endsWith('\n')
+      const toolCallsByKey = new Map<string, { id: string; name: string; arguments: string }>()
+      const toolCallKeyByIndex = new Map<number, string>()
+      const toolCallOrder: string[] = []
+      let stepReplayState: unknown
+
+      const emitTextChunk = (chunkText: string) => {
+        if (!chunkText) return
+        const out = needParagraphBreak ? `\n\n${chunkText}` : chunkText
+        needParagraphBreak = false
+        fullText += out
+        stepText += chunkText
+        options.onDelta?.(out)
+      }
+
+      const emitReasoningChunk = (chunkText: string) => {
+        if (!chunkText) return
+        fullReasoning += chunkText
+        stepReasoning += chunkText
+        options.onReasoningDelta?.(chunkText)
+      }
+
+      const upsertToolDelta = (
+        id: string,
+        index: number | undefined,
+        name: string | undefined,
+        argsDelta: string,
+      ) => {
+        const key = id || (index !== undefined ? toolCallKeyByIndex.get(index) : undefined) || `idx_${index ?? toolCallOrder.length}`
+        if (index !== undefined) toolCallKeyByIndex.set(index, key)
+        let entry = toolCallsByKey.get(key)
+        if (!entry) {
+          entry = { id: id || randomUUID(), name: name || 'unknown', arguments: '' }
+          toolCallsByKey.set(key, entry)
+          toolCallOrder.push(key)
         }
+        if (name) entry.name = name
+        entry.arguments += argsDelta
+      }
+
+      try {
+        for await (const chunk of streamIter) {
+          if (chunk.type === 'text-delta' && typeof chunk.text === 'string' && chunk.text.length > 0) {
+            if (typeof chunk.index === 'number') textDeltaSeenIndexes.add(chunk.index)
+            emitTextChunk(chunk.text)
+          } else if (
+            chunk.type === 'reasoning-delta' &&
+            typeof chunk.text === 'string' &&
+            chunk.text.length > 0
+          ) {
+            if (typeof chunk.index === 'number') reasoningDeltaSeenIndexes.add(chunk.index)
+            emitReasoningChunk(chunk.text)
+          } else if (chunk.type === 'tool-call-delta') {
+            upsertToolDelta(
+              chunk.id ?? '',
+              chunk.index,
+              chunk.name,
+              typeof chunk.argumentsDelta === 'string' ? chunk.argumentsDelta : '',
+            )
+          } else if (
+            chunk.type === 'block-end' &&
+            chunk.block?.type === 'text' &&
+            typeof chunk.block.text === 'string' &&
+            chunk.block.text.length > 0 &&
+            (typeof chunk.index !== 'number' || !textDeltaSeenIndexes.has(chunk.index))
+          ) {
+            emitTextChunk(chunk.block.text)
+          } else if (
+            chunk.type === 'block-end' &&
+            chunk.block?.type === 'reasoning' &&
+            typeof chunk.block.text === 'string' &&
+            chunk.block.text.length > 0 &&
+            (typeof chunk.index !== 'number' || !reasoningDeltaSeenIndexes.has(chunk.index))
+          ) {
+            emitReasoningChunk(chunk.block.text)
+          } else if (chunk.type === 'block-end' && chunk.block?.type === 'tool-call') {
+            const tcId = chunk.block.id || chunk.id || ''
+            const indexedKey = chunk.index !== undefined ? toolCallKeyByIndex.get(chunk.index) : undefined
+            const key = tcId || indexedKey || `idx_${chunk.index ?? toolCallOrder.length}`
+            if (chunk.index !== undefined) toolCallKeyByIndex.set(chunk.index, key)
+            const existing = toolCallsByKey.get(key)
+            if (!existing) {
+              toolCallsByKey.set(key, {
+                id: tcId || randomUUID(),
+                name: chunk.block.name || 'unknown',
+                arguments: chunk.block.arguments ?? '',
+              })
+              toolCallOrder.push(key)
+            } else {
+              if (tcId) existing.id = tcId
+              if (chunk.block.name) existing.name = chunk.block.name
+              if (typeof chunk.block.arguments === 'string') {
+                existing.arguments = chunk.block.arguments
+              }
+            }
+          } else if (chunk.type === 'finish') {
+            const kind = chunk.reason?.kind
+            if (kind === 'error' || kind === 'aborted') {
+              const msg = chunk.reason?.failure?.message || `Model stream ended (${kind})`
+              throw new Error(msg)
+            }
+            if (chunk.replayState !== undefined) {
+              stepReplayState = chunk.replayState
+            }
+          }
+        }
+      } catch (roundErr) {
+        if (
+          !retriedNoTools &&
+          round === 0 &&
+          !options.signal.aborted &&
+          fullText.trim().length === 0 &&
+          toolCallOrder.length === 0 &&
+          isRecoverableSingleTurnToolFailure(errorMessage(roundErr), fullReasoning)
+        ) {
+          retriedNoTools = true
+          forceNoTools = true
+          fullText = ''
+          fullReasoning = ''
+          effectiveSystem = `${effectiveSystem}\n\nCRITICAL: Tool and MCP calls are disabled for this turn and will immediately abort the response with no output. Do NOT invoke any tool, function, browser, or MCP server under any circumstances. Answer directly in plain text/markdown only.`
+          options.onRetryReset?.()
+          round -= 1
+          continue
+        }
+        throw roundErr
+      }
+
+      const stepCalls = toolCallOrder
+        .map((k) => toolCallsByKey.get(k)!)
+        .filter((tc) => Boolean(tc && tc.name))
+
+      if (!allowToolsThisRound || stepCalls.length === 0) {
+        break
+      }
+
+      const assistantBlocks: LlmContentBlockLike[] = []
+      if (stepReasoning) {
+        assistantBlocks.push({ type: 'reasoning', text: stepReasoning })
+      }
+      if (stepText) {
+        assistantBlocks.push({ type: 'text', text: stepText })
+      }
+      for (const tc of stepCalls) {
+        assistantBlocks.push({
+          type: 'tool-call',
+          id: tc.id,
+          name: tc.name,
+          arguments: tc.arguments,
+        })
+      }
+
+      llmMessages.push({
+        id: randomUUID(),
+        role: 'assistant',
+        source: {
+          kind: 'model',
+          provider: preparedConfig.provider,
+          model: preparedConfig.model,
+          ...(stepReplayState !== undefined ? { replayState: stepReplayState } : {}),
+        },
+        content: assistantBlocks,
+      })
+
+      for (const tc of stepCalls) {
+        options.signal.throwIfAborted()
+        const summary = summarizeToolCall(tc.name, tc.arguments)
+        options.onToolCall?.({
+          id: tc.id,
+          name: tc.name,
+          summary,
+          status: 'running',
+        })
+        const execResult = await options.toolchain!.execute(tc, options.signal)
+        options.onToolCall?.({
+          id: tc.id,
+          name: tc.name,
+          summary,
+          status: execResult.isError ? 'error' : 'done',
+          ...(execResult.isError
+            ? { error: execResult.preview }
+            : { outputPreview: execResult.preview }),
+        })
+        llmMessages.push({
+          id: randomUUID(),
+          role: 'tool',
+          toolCallId: tc.id,
+          source: { kind: 'tool', callId: tc.id },
+          content: [{ type: 'text', text: execResult.text }],
+          ...(execResult.isError ? { isError: true } : {}),
+        })
       }
     }
 
@@ -1168,24 +1480,81 @@ export class ThreadsService {
     }
   }
 
+  private async streamLlmText(options: {
+    model: ModelSelectionSpec
+    system: string
+    messages: LlmHistoryEntry[]
+    purpose: string
+    antigravitySessionId?: string
+    signal: AbortSignal
+    onDelta?: (delta: string) => void
+    onReasoningDelta?: (delta: string) => void
+  }): Promise<{ text: string; reasoning: string; model: ModelSelectionSpec }> {
+    return this.streamLlmWithTools({
+      ...options,
+      toolsEnabled: false,
+    })
+  }
+
   private async runSideChatStream(options: {
     sideChatId: string
     parentSessionId: string
     assistantMsgId: string
+    baseSideChat: SideChat
     model: ModelSelectionSpec
-    systemPrompt: string
+    contextSummary: string
+    toolsEnabled: boolean
     historyForLlm: LlmHistoryEntry[]
     streamEntry: ActiveSideChatStream
   }): Promise<SideChat> {
-    const { sideChatId, parentSessionId, assistantMsgId, model, systemPrompt, historyForLlm, streamEntry } =
-      options
+    const {
+      sideChatId,
+      parentSessionId,
+      assistantMsgId,
+      baseSideChat,
+      model,
+      contextSummary,
+      toolsEnabled,
+      historyForLlm,
+      streamEntry,
+    } = options
+    let toolchain: SideChatToolchain | undefined
     try {
-      const result = await this.streamLlmText({
+      let cwd: string | undefined
+      let agent: unknown
+      if (toolsEnabled) {
+        const resolved = await this.resolveSideChatWorkspaceAndAgent(parentSessionId)
+        cwd = resolved.cwd
+        agent = resolved.agent
+        toolchain = await resolveSideChatToolchain({
+          tools: this.deps.tools,
+          web: this.deps.web,
+          skills: this.deps.skills,
+          agent,
+          cwd,
+          model,
+          signal: streamEntry.controller.signal,
+        })
+      }
+
+      const systemPrompt = [
+        'You are answering a focused side-chat question alongside a parent coding session.',
+        toolsEnabled
+          ? 'Be concise, direct, and strictly read-only: do NOT edit files, do NOT run mutating commands, and do NOT invoke browser automation, desktop control, or any tool that modifies state or requires interactive permission. Only use non-interactive read-only tools if directly available; otherwise answer directly in text using the supplied parent context and your knowledge.'
+          : 'Be concise, direct, and strictly read-only: do NOT edit files, do NOT run mutating commands, and do NOT invoke any tools or MCP servers. Answer directly in text using the supplied parent context and the user question.',
+        contextSummary ? `\n${contextSummary}` : '',
+      ]
+        .filter(Boolean)
+        .join('\n')
+
+      const result = await this.streamLlmWithTools({
         model,
         system: systemPrompt,
         messages: historyForLlm,
         purpose: 'dsh-threads-side-chat',
         antigravitySessionId: parentSessionId,
+        toolsEnabled,
+        toolchain,
         signal: streamEntry.controller.signal,
         onDelta: (delta) => {
           streamEntry.text += delta
@@ -1213,6 +1582,43 @@ export class ThreadsService {
             seq: streamEntry.seq,
           })
         },
+        onToolCall: (toolCall) => {
+          const existingIdx = streamEntry.toolCalls.findIndex((t) => t.id === toolCall.id)
+          if (existingIdx >= 0) {
+            streamEntry.toolCalls[existingIdx] = toolCall
+          } else {
+            streamEntry.toolCalls.push(toolCall)
+          }
+          streamEntry.seq += 1
+          this.deps.bus.emit({
+            type: 'side-chat-tool',
+            parentSessionId,
+            sideChatId,
+            messageId: assistantMsgId,
+            toolCall,
+            seq: streamEntry.seq,
+          })
+        },
+        onRetryReset: () => {
+          streamEntry.text = ''
+          streamEntry.reasoning = ''
+          streamEntry.toolCalls = []
+          streamEntry.seq += 1
+          const resetSnapshot = structuredClone(baseSideChat)
+          const target = resetSnapshot.messages.find((m) => m.id === assistantMsgId)
+          if (target) {
+            target.text = ''
+            target.reasoning = ''
+            target.toolCalls = []
+            target.streaming = true
+            target.streamSeq = streamEntry.seq
+          }
+          this.deps.bus.emit({
+            type: 'side-chat-updated',
+            parentSessionId,
+            sideChat: resetSnapshot,
+          })
+        },
       })
 
       const finalized = await this.deps.store.updateSideChat(sideChatId, (chat) => {
@@ -1223,6 +1629,9 @@ export class ThreadsService {
           const persistedReasoning = capReasoningText(result.reasoning || streamEntry.reasoning)
           if (persistedReasoning) {
             target.reasoning = persistedReasoning
+          }
+          if (streamEntry.toolCalls.length > 0) {
+            target.toolCalls = streamEntry.toolCalls.map((t) => ({ ...t }))
           }
           target.streaming = false
           target.model = result.model
@@ -1251,6 +1660,9 @@ export class ThreadsService {
           if (persistedReasoning) {
             target.reasoning = persistedReasoning
           }
+          if (streamEntry.toolCalls.length > 0) {
+            target.toolCalls = streamEntry.toolCalls.map((t) => ({ ...t }))
+          }
           target.streaming = false
           if (!persistedText || !isAbort) {
             target.error = errText
@@ -1269,6 +1681,7 @@ export class ThreadsService {
       }
       throw error
     } finally {
+      toolchain?.dispose()
       if (this.activeStreams.get(sideChatId) === streamEntry) {
         this.activeStreams.delete(sideChatId)
       }
@@ -1294,6 +1707,8 @@ export class ThreadsService {
     }
 
     const nextModel = req.model?.provider && req.model?.model ? req.model : existing.model
+    const nextToolsEnabled =
+      typeof req.toolsEnabled === 'boolean' ? req.toolsEnabled : (existing.toolsEnabled ?? true)
     const now = Date.now()
     const userMsgId = randomUUID()
     const userMsg: SideChatMessage = {
@@ -1320,6 +1735,9 @@ export class ThreadsService {
     const prepared = await this.deps.store.updateSideChat(sideChatId, (chat) => {
       const next = structuredClone(chat)
       next.model = nextModel
+      if (typeof req.toolsEnabled === 'boolean') {
+        next.toolsEnabled = req.toolsEnabled
+      }
       if (next.messages.length === 0 && next.title.startsWith('Side chat ·')) {
         next.title = deriveShortTitle(promptText, next.title)
       }
@@ -1331,20 +1749,13 @@ export class ThreadsService {
       throw new NotFoundError(`Side chat not found: ${sideChatId}`)
     }
 
-    const systemPrompt = [
-      'You are answering a focused side-chat question alongside a parent coding session.',
-      'Be concise, direct, and strictly read-only: do NOT edit files, do NOT run mutating commands, and answer using the supplied parent context and the user question.',
-      prepared.contextSummary ? `\n${prepared.contextSummary}` : '',
-    ]
-      .filter(Boolean)
-      .join('\n')
-
     const abortController = new AbortController()
     const streamEntry: ActiveSideChatStream = {
       messageId: assistantMsgId,
       controller: abortController,
       text: '',
       reasoning: '',
+      toolCalls: [],
       seq: 0,
       done: Promise.resolve(prepared),
     }
@@ -1360,8 +1771,10 @@ export class ThreadsService {
       sideChatId,
       parentSessionId: prepared.parentSessionId,
       assistantMsgId,
+      baseSideChat: prepared,
       model: nextModel,
-      systemPrompt,
+      contextSummary: prepared.contextSummary,
+      toolsEnabled: nextToolsEnabled,
       historyForLlm,
       streamEntry,
     })

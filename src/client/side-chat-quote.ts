@@ -5,25 +5,56 @@ export interface UserMessageSegment {
   text: string
 }
 
+export type DraftSegment =
+  | { kind: 'text'; text: string }
+  | { kind: 'quote'; text: string }
+
 export function normalizeQuotedText(raw: string): string {
   return raw.replace(/\r\n?/g, '\n').trim().slice(0, SIDE_CHAT_QUOTE_MAX)
 }
 
-export function formatQuotedSideChatPrompt(quotes: readonly string[], body: string): string {
-  const formattedQuotes: string[] = []
-  for (const raw of quotes) {
-    const clean = normalizeQuotedText(raw)
-    if (!clean) continue
-    const block = clean
-      .split('\n')
-      .map((line) => (line.length > 0 ? `> ${line}` : '>'))
-      .join('\n')
-    formattedQuotes.push(block)
+export function formatQuoteBlock(raw: string): string {
+  const clean = normalizeQuotedText(raw)
+  if (!clean) return ''
+  return clean
+    .split('\n')
+    .map((line) => (line.length > 0 ? `> ${line}` : '>'))
+    .join('\n')
+}
+
+export function serializeDraftSegments(segments: readonly DraftSegment[]): string {
+  const merged: DraftSegment[] = []
+  for (const seg of segments) {
+    const normalizedText = seg.text.replace(/\r\n?/g, '\n')
+    if (seg.kind === 'text') {
+      const prev = merged[merged.length - 1]
+      if (prev && prev.kind === 'text') {
+        prev.text += normalizedText
+      } else {
+        merged.push({ kind: 'text', text: normalizedText })
+      }
+    } else {
+      merged.push({ kind: 'quote', text: normalizedText })
+    }
   }
 
-  const cleanBody = body.replace(/\r\n?/g, '\n').trim()
-  const parts = cleanBody ? [...formattedQuotes, cleanBody] : formattedQuotes
+  const parts: string[] = []
+  for (const seg of merged) {
+    if (seg.kind === 'quote') {
+      const block = formatQuoteBlock(seg.text)
+      if (block) parts.push(block)
+    } else {
+      const clean = seg.text.trim()
+      if (clean) parts.push(clean)
+    }
+  }
   return parts.join('\n\n')
+}
+
+export function formatQuotedSideChatPrompt(quotes: readonly string[], body: string): string {
+  const segments: DraftSegment[] = quotes.map((q) => ({ kind: 'quote', text: q }))
+  if (body) segments.push({ kind: 'text', text: body })
+  return serializeDraftSegments(segments)
 }
 
 export function parseQuotedUserText(text: string): UserMessageSegment[] {

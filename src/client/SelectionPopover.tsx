@@ -20,12 +20,20 @@ export interface SelectionPopoverProps {
   t?: (key: string) => string
 }
 
+function getOptionalModelDirectories(
+  ctx: DshClientContext,
+): DshClientContext['modelDirectories'] | undefined {
+  return (
+    typeof ctx.get === 'function'
+      ? ctx.get('modelDirectories')
+      : ctx.modelDirectories
+  ) as DshClientContext['modelDirectories'] | undefined
+}
+
 function readClaudeSessionFlag(ctx: DshClientContext, sessionId: string): boolean {
   if (!sessionId) return false
   try {
-    const dirApi =
-      ctx.modelDirectories ??
-      (ctx.get?.('modelDirectories') as DshClientContext['modelDirectories'] | undefined)
+    const dirApi = getOptionalModelDirectories(ctx)
     const liveProvider = dirApi?.directoryFor?.(sessionId)?.store?.getSnapshot()?.current?.provider
     if (liveProvider !== undefined) {
       return liveProvider.startsWith('claude-code')
@@ -44,9 +52,7 @@ function useIsClaudeSession(ctx: DshClientContext, sessionId: string): boolean {
     (notify) => {
       const offs: Array<() => void> = []
       try {
-        const dirApi =
-          ctx.modelDirectories ??
-          (ctx.get?.('modelDirectories') as DshClientContext['modelDirectories'] | undefined)
+        const dirApi = getOptionalModelDirectories(ctx)
         const unsub = dirApi?.directoryFor?.(sessionId)?.store?.subscribe(notify)
         if (unsub) offs.push(unsub)
       } catch {

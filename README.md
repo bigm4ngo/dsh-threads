@@ -6,11 +6,11 @@ Works across any LLM provider configured in your DSH profile without tying workf
 
 ## Features
 
-- **Side Chats**: Multi-turn, read-only streaming Q&A (with live thinking/reasoning output when supported by the model) anchored to the current session, a specific turn, or a highlighted passage. Side chats stay out of the main transcript and left sidebar, support switching models or reasoning effort mid-thread, and can merge findings back into the parent session or be promoted into a full session.
+- **Side Chats**: Multi-turn, read-only streaming Q&A (with live thinking/reasoning output when supported by the model) anchored to the current session, a specific turn, or a highlighted passage. Supports toggleable read-only research tools & skills (`web_search`, `web_fetch`, `read`, `glob`, `grep`, `skill`), inline draft quote pills, message copy, pinned switcher & model controls, merge-back into the parent session, and promotion into a full session.
 - **Fork Tree & Merge-Back**: Visualize and navigate branches, edit-retries, promoted side chats, and handoffs in the right-sidebar **Threads** tab and the session header lineage pill. Merge edited or AI-distilled findings back into any parent session.
 - **Edit & Retry Earlier Prompts**: Non-destructively branch from before any earlier turn to revise a prompt or switch models without touching files on disk.
 - **Portable Provider Handoff**: Move an ongoing task to a fresh session or a different model/provider with an editable handoff packet, an explicit **Transfer Manifest** (*Moves* vs *Stays behind*), optional **AI Distill**, and workspace safety guards.
-- **Inline Controls & Slash Commands**: Quick actions under every turn (`Side chat`, `Edit & Retry`, `Branch`), a chat text-selection popover (`Quote`, `Side chat`, plus `Claude /btw` on Claude Code sessions when Oh My Claude is installed), and `/side` and `/handoff` slash commands.
+- **Inline Controls & Slash Commands**: Quick actions under every turn (`Side chat`, `Edit & Retry`, `Branch`), a chat text-selection popover (`Quote`, `Side chat`), and `/side` and `/handoff` slash commands.
 
 ## Requirements
 
@@ -46,8 +46,8 @@ The right-sidebar **Threads** tab is organized into four sub-tabs:
 Ask follow-up questions about the current conversation without polluting the main session history or cluttering the left sidebar.
 
 1. Open **Threads → Side Chats** (or highlight a passage in chat and click **Side chat**, or run `/side <question>`).
-2. Switch between side chats or click **+ New** at any time from the pinned header bar, and change the model or reasoning effort directly in the pinned composer controls.
-3. Ask follow-up questions in the side-chat composer. Text and reasoning stream live; click **Stop** at any time to cancel a response in progress while keeping partial output. You can copy any side-chat message or highlight text inside a side chat to quote or copy it straight into the side-chat composer.
+2. Switch between side chats or click **+ New** at any time from the pinned header bar (deleting asks for confirmation first), and change the model, reasoning effort, or **Tools: Research** toggle directly in the pinned composer controls.
+3. Ask follow-up questions in the side-chat composer. Text, reasoning, and read-only research tool calls (`web_search`, `web_fetch`, `read`, `glob`, `grep`, `skill`) stream live; click **Stop** at any time to cancel a response in progress while keeping partial output. You can copy any side-chat message or highlight text inside a side chat to insert an inline quote pill into the side-chat draft (**Quote text**), send a quote directly to the main session draft (**Quote to main**), or **Copy** it.
 4. When you have an answer worth bringing back:
    - **Add findings to parent**: Review or edit the findings (optionally click **AI Distill** to condense the thread), then choose **Insert into draft** (appends below any unfinished text in the parent typing box without overwriting it) or **Send now**.
    - **Promote to session**: Graduate the side chat into a full DSH session in either the **Same workspace** or a **New isolated Git worktree**, via **Open in typing box** or **Promote & Send now**.

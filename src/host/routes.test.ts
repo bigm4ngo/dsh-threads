@@ -399,7 +399,7 @@ test('HTTP side-chat non-blocking streaming emits real-time deltas and supports 
       srv.llmCalls[1].messages.map((m) => ({
         role: m.role,
         sourceKind: m.source.kind,
-        text: m.content[0].text,
+        text: m.content[0]?.type === 'text' ? m.content[0].text : '',
       })),
       [
         { role: 'user', sourceKind: 'user', text: 'first question' },

@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { CatalogResponse, SessionInspectResponse, SideChat } from '../shared/types.ts'
+import type {
+  CatalogResponse,
+  SessionInspectResponse,
+  SideChat,
+  SideChatToolCall,
+} from '../shared/types.ts'
 import { isThreadsSseOpen, subscribeThreadsEvents, threadsApi } from './api.ts'
 import type { SidebarRightTabProps } from './dsh-types.ts'
 import { ForkTreeView } from './ForkTreeView.tsx'
@@ -16,6 +21,7 @@ import {
 export interface SideChatStreamBuffer {
   text: string
   reasoning: string
+  toolCalls: SideChatToolCall[]
   seq: number
 }
 
@@ -80,6 +86,8 @@ export function ThreadsTabBody(props: SidebarRightTabProps) {
   const latestSeqByMsgRef = useRef<Record<string, number>>({})
   const sessionIdRef = useRef(sessionId)
   sessionIdRef.current = sessionId
+  const hasInspectRef = useRef(false)
+  hasInspectRef.current = inspect !== null
 
   const syncBuffersForChats = useCallback(
     (chats: readonly SideChat[], scope: 'all' | 'partial' = 'all') => {
@@ -99,7 +107,7 @@ export function ThreadsTabBody(props: SidebarRightTabProps) {
               const serverSeq = msg.streamSeq ?? 0
               const cur = prev[msg.id]
               if (!cur) {
-                if (msg.text || msg.reasoning || serverSeq > 0) {
+                if (msg.text || msg.reasoning || msg.toolCalls?.length || serverSeq > 0) {
                   latestSeqByMsgRef.current[msg.id] = Math.max(
                     latestSeqByMsgRef.current[msg.id] ?? 0,
                     serverSeq,
@@ -107,6 +115,7 @@ export function ThreadsTabBody(props: SidebarRightTabProps) {
                   ensureNext()[msg.id] = {
                     text: msg.text,
                     reasoning: msg.reasoning ?? '',
+                    toolCalls: msg.toolCalls ? msg.toolCalls.map((t) => ({ ...t })) : [],
                     seq: serverSeq,
                   }
                 }
@@ -118,6 +127,9 @@ export function ThreadsTabBody(props: SidebarRightTabProps) {
                 ensureNext()[msg.id] = {
                   text: msg.text,
                   reasoning: msg.reasoning ?? cur.reasoning,
+                  toolCalls: msg.toolCalls?.length
+                    ? msg.toolCalls.map((t) => ({ ...t }))
+                    : cur.toolCalls,
                   seq: serverSeq,
                 }
               }
@@ -288,7 +300,7 @@ export function ThreadsTabBody(props: SidebarRightTabProps) {
             latestSeqByMsgRef.current[ev.messageId] = ev.seq
           }
           setStreamingBuffers((prev) => {
-            const cur = prev[ev.messageId] ?? { text: '', reasoning: '', seq: 0 }
+            const cur = prev[ev.messageId] ?? { text: '', reasoning: '', toolCalls: [], seq: 0 }
             if (ev.seq !== undefined && cur.seq >= ev.seq) return prev
             const nextSeq = ev.seq ?? cur.seq + 1
             return {
@@ -296,6 +308,40 @@ export function ThreadsTabBody(props: SidebarRightTabProps) {
               [ev.messageId]: {
                 text: ev.channel === 'reasoning' ? cur.text : `${cur.text}${ev.delta}`,
                 reasoning: ev.channel === 'reasoning' ? `${cur.reasoning}${ev.delta}` : cur.reasoning,
+                toolCalls: cur.toolCalls,
+                seq: nextSeq,
+              },
+            }
+          })
+          if (missedSeq) {
+            void refreshSideChats()
+          }
+          return
+        }
+        if (ev.type === 'side-chat-tool' && ev.parentSessionId === sessionId) {
+          const prevSeq = latestSeqByMsgRef.current[ev.messageId] ?? 0
+          if (ev.seq !== undefined && prevSeq >= ev.seq) {
+            return
+          }
+          const missedSeq = ev.seq !== undefined && prevSeq > 0 && ev.seq > prevSeq + 1
+          if (ev.seq !== undefined) {
+            latestSeqByMsgRef.current[ev.messageId] = ev.seq
+          }
+          setStreamingBuffers((prev) => {
+            const cur = prev[ev.messageId] ?? { text: '', reasoning: '', toolCalls: [], seq: 0 }
+            if (ev.seq !== undefined && cur.seq >= ev.seq) return prev
+            const nextSeq = ev.seq ?? cur.seq + 1
+            const idx = cur.toolCalls.findIndex((t) => t.id === ev.toolCall.id)
+            const nextToolCalls =
+              idx >= 0
+                ? cur.toolCalls.map((t, i) => (i === idx ? ev.toolCall : t))
+                : [...cur.toolCalls, ev.toolCall]
+            return {
+              ...prev,
+              [ev.messageId]: {
+                text: cur.text,
+                reasoning: cur.reasoning,
+                toolCalls: nextToolCalls,
                 seq: nextSeq,
               },
             }
@@ -325,7 +371,11 @@ export function ThreadsTabBody(props: SidebarRightTabProps) {
       },
       {
         onReconnect: () => {
-          void refreshSideChats()
+          if (!hasInspectRef.current) {
+            loadAll()
+          } else {
+            void refreshSideChats()
+          }
         },
       },
     )

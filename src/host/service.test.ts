@@ -15,6 +15,7 @@ import {
   type SessionQueryLike,
   ThreadsService,
 } from './service.ts'
+import type { SkillRegistryLike, ToolsServiceLike, WebServiceLike } from './side-chat-tools.ts'
 import { ThreadsStore } from './store.ts'
 
 function assertCanonicalDshMessages(messages: LlmGenerateOptionsLike['messages']): void {
@@ -34,9 +35,16 @@ function assertCanonicalDshMessages(messages: LlmGenerateOptionsLike['messages']
       // Mirror LlmRuntime.forAdapter: accessing message.source.replayState throws if source is missing.
       const _replayState = message.source.replayState
       void _replayState
+    } else if (message.role === 'tool') {
+      assert.ok(message.source && message.source.kind === 'tool', 'tool message must carry source.kind=tool')
+      assert.ok(typeof message.toolCallId === 'string' && message.toolCallId.length > 0)
     } else {
       assert.equal(message.role, 'user')
-      assert.ok(message.source && message.source.kind === 'user', 'user message must carry source.kind=user')
+      assert.ok(
+        message.source &&
+          (message.source.kind === 'user' || message.source.kind === 'runtime-context'),
+        'user message must carry source.kind=user or runtime-context',
+      )
     }
   }
 }
@@ -45,6 +53,9 @@ function createHarness(options: {
   stateDir: string
   cwd: string
   running?: boolean
+  tools?: ToolsServiceLike
+  web?: WebServiceLike
+  skills?: SkillRegistryLike
   streamImpl?: (opts: LlmGenerateOptionsLike) => AsyncIterable<LlmChunkLike>
 }) {
   let seq = 0
@@ -204,6 +215,9 @@ function createHarness(options: {
     workspaceRegistry: {
       list: () => [{ id: 'ws-1', path: options.cwd, sessionIds: ['parent-1'] }],
     },
+    ...(options.tools ? { tools: options.tools } : {}),
+    ...(options.web ? { web: options.web } : {}),
+    ...(options.skills ? { skills: options.skills } : {}),
   })
 
   return {
@@ -244,7 +258,7 @@ test('SideChat routes Claude without sessionId, Antigravity with parentSessionId
     assert.equal(h.llmCalls[0].sessionId, undefined)
     assert.equal(h.llmCalls[0].maxTokens, 4096)
 
-    // Antigravity side chat must pass parentSessionId and canonical assistant history.
+    // Antigravity side chat must pass parentSessionId, read-only runtime-context, and canonical assistant history.
     const turn2 = await h.service.sendSideChatMessage(
       chatClaude.id,
       {
@@ -255,8 +269,9 @@ test('SideChat routes Claude without sessionId, Antigravity with parentSessionId
     )
     assert.equal(turn2.messages.length, 4)
     assert.equal(h.llmCalls[1].sessionId, 'parent-1')
+    assert.equal(h.llmCalls[1].messages[0].source.kind, 'runtime-context')
     assert.deepEqual(
-      h.llmCalls[1].messages.map((m) => m.role),
+      h.llmCalls[1].messages.slice(1).map((m) => m.role),
       ['user', 'assistant', 'user'],
     )
 
@@ -343,7 +358,7 @@ test('SideChat strips failed turns on retry, recovers stale streaming flags, and
     assert.deepEqual(
       h.llmCalls.at(-1)!.messages.map((m) => ({
         role: m.role,
-        text: m.content[0].text,
+        text: m.content[0]?.type === 'text' ? m.content[0].text : '',
       })),
       [
         { role: 'user', text: 'Turn 1 question' },
@@ -512,6 +527,189 @@ test('Edit & Retry handles Turn 1 vs Turn N, preserves model after fork, and enf
     assert.ok(wtHandoff.edge.worktree?.branch.startsWith('dsh-threads/handoff/'))
     assert.equal(wtHandoff.draftText, 'Handoff packet content')
     assert.equal(h.createdCalls.at(-1)?.cwd, wtHandoff.edge.worktree?.path)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('SideChat executes read-only web_search tool loop when enabled and omits tools when disabled', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-threads-tools-loop-'))
+  try {
+    const web: WebServiceLike = {
+      searchReady: async () => true,
+      fetchReady: async () => true,
+      search: async ({ query }) => ({
+        content: `Result for ${query}`,
+        sources: [{ url: 'https://example.org/ref', title: 'Ref' }],
+      }),
+      fetch: async ({ url }) => ({ url, statusCode: 200, body: { kind: 'text', content: 'ok' } }),
+    }
+
+    let step = 0
+    const h = createHarness({
+      stateDir: dir,
+      cwd: dir,
+      web,
+      streamImpl: async function* (opts) {
+        step += 1
+        if (step === 1) {
+          assert.ok(opts.tools?.some((t) => t.name === 'web_search'))
+          assert.equal(opts.system?.includes('web_search'), false)
+          assert.equal(opts.system?.includes('web_fetch'), false)
+          assert.equal(opts.system?.includes('<available_skills>'), false)
+          assert.equal(opts.system?.includes('provided read-only research tools'), false)
+          yield {
+            type: 'block-end',
+            index: 0,
+            block: {
+              type: 'tool-call',
+              id: 'call-web-1',
+              name: 'web_search',
+              arguments: JSON.stringify({ queries: ['dsh threads docs'] }),
+            },
+          }
+          yield { type: 'finish', reason: { kind: 'tool-calls' } }
+          return
+        }
+        const toolMsg = opts.messages.find((m) => m.role === 'tool')
+        assert.ok(toolMsg, 'second step must receive tool result message')
+        assert.match(toolMsg.content[0].text, /Result for dsh threads docs/)
+        yield { type: 'text-delta', index: 0, text: 'Found it in docs.' }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      },
+    })
+
+    const emitted: ThreadsSseEvent[] = []
+    const origEmit = h.bus.emit.bind(h.bus)
+    h.bus.emit = (ev) => {
+      emitted.push(ev)
+      origEmit(ev)
+    }
+
+    const withTools = await h.service.createSideChat(
+      {
+        parentSessionId: 'parent-1',
+        model: { provider: 'openrouter', model: 'z-ai/glm-5.3-flash' },
+        question: 'Look up dsh threads docs',
+      },
+      { wait: true },
+    )
+    assert.equal(withTools.toolsEnabled, true)
+    assert.equal(withTools.messages[1].text, 'Found it in docs.')
+    assert.equal(withTools.messages[1].toolCalls?.length, 1)
+    assert.equal(withTools.messages[1].toolCalls?.[0].name, 'web_search')
+    assert.equal(withTools.messages[1].toolCalls?.[0].status, 'done')
+
+    const toolEvents = emitted.filter((e) => e.type === 'side-chat-tool')
+    assert.deepEqual(
+      toolEvents.map((e) => e.toolCall.status),
+      ['running', 'done'],
+    )
+
+    h.setStreamImpl(async function* (opts) {
+      assert.equal(opts.tools, undefined)
+      assert.match(opts.system ?? '', /do NOT invoke any tools/i)
+      yield { type: 'text-delta', index: 0, text: 'No tools answer.' }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    })
+
+    const noTools = await h.service.sendSideChatMessage(
+      withTools.id,
+      { text: 'Answer offline only', toolsEnabled: false },
+      { wait: true },
+    )
+    assert.equal(noTools.toolsEnabled, false)
+    assert.equal(noTools.messages.at(-1)?.text, 'No tools answer.')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('SideChat automatically retries text-only when provider hits single-turn limit on denied MCP tool', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-threads-singleturn-retry-'))
+  try {
+    let calls = 0
+    const h = createHarness({
+      stateDir: dir,
+      cwd: dir,
+      streamImpl: async function* (opts) {
+        calls += 1
+        if (calls === 1) {
+          yield {
+            type: 'reasoning-delta',
+            index: 0,
+            text: '⚠ Denied mcp__plugin_playwright_playwright__browser_navigate: Claude requested permissions to use mcp__plugin_playwright_playwright__browser_navigate, but you haven\'t granted it yet.',
+          }
+          yield {
+            type: 'finish',
+            reason: {
+              kind: 'error',
+              failure: { message: 'Reached maximum number of turns (1)' },
+            },
+          }
+          return
+        }
+
+        assert.equal(opts.tools, undefined)
+        assert.match(opts.system ?? '', /Do NOT invoke any tool/i)
+        const lastUser = [...opts.messages].reverse().find((m) => m.role === 'user')
+        assert.ok(lastUser)
+        assert.ok(
+          lastUser.content.some(
+            (b) => b.type === 'text' && b.text.includes('Tool and MCP calls are unavailable'),
+          ),
+        )
+        yield { type: 'text-delta', index: 0, text: 'Direct text recommendation.' }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      },
+    })
+
+    const emitted: ThreadsSseEvent[] = []
+    const origEmit = h.bus.emit.bind(h.bus)
+    h.bus.emit = (ev) => {
+      emitted.push(ev)
+      origEmit(ev)
+    }
+
+    const retried = await h.service.createSideChat(
+      {
+        parentSessionId: 'parent-1',
+        model: { provider: 'claude-code', model: 'claude-opus-5-5' },
+        question: 'Suggest a better code review tool',
+      },
+      { wait: true },
+    )
+
+    assert.equal(calls, 2)
+    assert.equal(retried.messages[0].text, 'Suggest a better code review tool')
+    assert.equal(retried.messages[0].text.includes('Tool and MCP calls are unavailable'), false)
+    assert.equal(retried.messages[1].error, undefined)
+    assert.equal(retried.messages[1].reasoning, undefined)
+    assert.equal(retried.messages[1].text, 'Direct text recommendation.')
+
+    const resetEvents = emitted.filter(
+      (ev): ev is Extract<ThreadsSseEvent, { type: 'side-chat-updated' }> =>
+        ev.type === 'side-chat-updated' &&
+        ev.sideChat.messages.some((m) => m.streaming === true && m.reasoning === ''),
+    )
+    assert.equal(resetEvents.length, 1)
+
+    // Non-recoverable errors must not retry.
+    let fatalCalls = 0
+    h.setStreamImpl(async function* () {
+      fatalCalls += 1
+      yield {
+        type: 'finish',
+        reason: { kind: 'error', failure: { message: 'API rate limit exceeded' } },
+      }
+    })
+    const failed = await h.service.sendSideChatMessage(
+      retried.id,
+      { text: 'Trigger rate limit' },
+      { wait: true },
+    )
+    assert.equal(fatalCalls, 1)
+    assert.equal(failed.messages.at(-1)?.error, 'API rate limit exceeded')
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

@@ -33,16 +33,23 @@ export function LineageHeaderPill({
 
   useEffect(() => {
     const cancel = refresh()
-    const unsub = subscribeThreadsEvents((ev) => {
-      if (!sessionId) return
-      if (
-        (ev.type === 'lineage-updated' && ev.sessionIds.includes(sessionId)) ||
-        (ev.type === 'side-chat-updated' && ev.parentSessionId === sessionId) ||
-        (ev.type === 'side-chat-deleted' && ev.parentSessionId === sessionId)
-      ) {
-        refresh()
-      }
-    })
+    const unsub = subscribeThreadsEvents(
+      (ev) => {
+        if (!sessionId) return
+        if (
+          (ev.type === 'lineage-updated' && ev.sessionIds.includes(sessionId)) ||
+          (ev.type === 'side-chat-updated' && ev.parentSessionId === sessionId) ||
+          (ev.type === 'side-chat-deleted' && ev.parentSessionId === sessionId)
+        ) {
+          refresh()
+        }
+      },
+      {
+        onReconnect: () => {
+          refresh()
+        },
+      },
+    )
     return () => {
       cancel?.()
       unsub()

@@ -2,6 +2,12 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { ThreadsEventBus } from './events.ts'
 import { createThreadsHandler, type ConnectionLike } from './routes.ts'
 import {
+  type AgentsServiceLike,
+  type SkillRegistryLike,
+  type ToolsServiceLike,
+  type WebServiceLike,
+} from './side-chat-tools.ts'
+import {
   type LlmServiceLike,
   type PermissionPresetsLike,
   type SessionControllerLike,
@@ -43,7 +49,7 @@ interface HostScopedContext {
     error?(message: string): void
   }
   get?<T>(name: string): T | undefined
-  on?(event: string, listener: () => void): void
+  effect(execute: () => (() => void | Promise<void>) | void, label?: string): () => void
   [key: string]: unknown
 }
 
@@ -53,8 +59,7 @@ export interface HostPluginContext {
 
 function getOptionalService<T>(ctx: HostScopedContext, name: string): T | undefined {
   if (typeof ctx.get === 'function') {
-    const resolved = ctx.get<T>(name)
-    if (resolved !== undefined) return resolved
+    return ctx.get<T>(name)
   }
   return ctx[name] as T | undefined
 }
@@ -93,6 +98,10 @@ export function apply(ctx: HostPluginContext): void {
       workspaceRegistry: getOptionalService<WorkspaceRegistryLike>(scoped, 'workspaceRegistry'),
       permissionPresets: getOptionalService<PermissionPresetsLike>(scoped, 'permissionPresets'),
       sessions: getOptionalService<SessionsServiceLike>(scoped, 'sessions'),
+      tools: getOptionalService<ToolsServiceLike>(scoped, 'tools'),
+      web: getOptionalService<WebServiceLike>(scoped, 'web'),
+      skills: getOptionalService<SkillRegistryLike>(scoped, 'skills'),
+      agents: getOptionalService<AgentsServiceLike>(scoped, 'agents'),
       logger: scoped.logger,
     })
 
@@ -102,65 +111,68 @@ export function apply(ctx: HostPluginContext): void {
       connection: scoped.connection,
     })
 
-    const disposers: Array<() => void> = []
+    scoped.effect(() => () => {
+      service.dispose()
+      bus.close()
+    }, 'dsh-threads: service')
 
-    const disposeRoute = scoped.webServer.register({
-      kind: 'prefix',
-      path: '/dsh-threads',
-      handler,
-    })
-    if (typeof disposeRoute === 'function') {
-      disposers.push(() => {
-        void disposeRoute()
+    scoped.effect(() => {
+      const disposeRoute = scoped.webServer.register({
+        kind: 'prefix',
+        path: '/dsh-threads',
+        handler,
       })
-    }
+      return () => {
+        if (typeof disposeRoute === 'function') {
+          void disposeRoute()
+        }
+      }
+    }, 'dsh-threads: http route')
 
     const commands = getOptionalService<CommandsRuntimeLike>(scoped, 'commands')
     if (commands && typeof commands.register === 'function') {
-      try {
-        disposers.push(
-          commands.register({
-            name: 'side',
-            description: 'Open or ask a provider-neutral side chat in the Threads sidebar',
-            input: { hint: 'Optional question about the current conversation' },
-            handler: ({ agent, rawInput }) => {
-              const sid = agent.session?.id ?? agent.id
-              return service.handleSlashSide(sid, rawInput)
-            },
-          }),
-        )
-        disposers.push(
-          commands.register({
-            name: 'handoff',
-            description: 'Open portable provider handoff in the Threads sidebar',
-            input: { hint: 'Optional handoff instruction for the next model' },
-            handler: ({ agent, rawInput }) => {
-              const sid = agent.session?.id ?? agent.id
-              return service.handleSlashHandoff(sid, rawInput)
-            },
-          }),
-        )
-      } catch (error) {
-        scoped.logger?.warn?.(
-          `dsh-threads: failed to register slash commands: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        )
-      }
-    }
-
-    if (typeof scoped.on === 'function') {
-      scoped.on('dispose', () => {
-        for (const dispose of disposers) {
-          try {
-            dispose()
-          } catch {
-            // Ignore individual disposer failures on teardown.
+      scoped.effect(() => {
+        const cmdDisposers: Array<() => void> = []
+        try {
+          cmdDisposers.push(
+            commands.register({
+              name: 'side',
+              description: 'Open or ask a provider-neutral side chat in the Threads sidebar',
+              input: { hint: 'Optional question about the current conversation' },
+              handler: ({ agent, rawInput }) => {
+                const sid = agent.session?.id ?? agent.id
+                return service.handleSlashSide(sid, rawInput)
+              },
+            }),
+          )
+          cmdDisposers.push(
+            commands.register({
+              name: 'handoff',
+              description: 'Open portable provider handoff in the Threads sidebar',
+              input: { hint: 'Optional handoff instruction for the next model' },
+              handler: ({ agent, rawInput }) => {
+                const sid = agent.session?.id ?? agent.id
+                return service.handleSlashHandoff(sid, rawInput)
+              },
+            }),
+          )
+        } catch (error) {
+          scoped.logger?.warn?.(
+            `dsh-threads: failed to register slash commands: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          )
+        }
+        return () => {
+          for (const dispose of cmdDisposers.reverse()) {
+            try {
+              dispose()
+            } catch {
+              // Ignore individual disposer failures on teardown.
+            }
           }
         }
-        service.dispose()
-        bus.close()
-      })
+      }, 'dsh-threads: slash commands')
     }
   })
 }
